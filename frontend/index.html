@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FormFlow</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 3rem; background: #0f172a; color: #e2e8f0; }
+    h1 { color: #38bdf8; }
+    .badge { position: fixed; bottom: 1rem; right: 1rem; background: #1e293b; padding: 0.6rem 1rem;
+             border-radius: 8px; font-size: 0.8rem; border: 1px solid #334155; }
+    #backend-version { color: #4ade80; }
+  </style>
+</head>
+<body>
+  <h1>FormFlow</h1>
+  <p>Continuous shipping, without losing track of what's live.</p>
+
+  <div class="badge">
+    frontend: <span id="frontend-version">loading…</span><br/>
+    backend: <span id="backend-version">loading…</span>
+  </div>
+
+  <script>
+    document.getElementById('frontend-version').textContent = window.__FRONTEND_VERSION__ || 'dev';
+
+    fetch('/api/version')
+      .then(r => r.json())
+      .then(d => { document.getElementById('backend-version').textContent = d.version + ' (' + d.gitSha + ')'; })
+      .catch(() => { document.getElementById('backend-version').textContent = 'unreachable'; });
+  </script>
+  <script src="/version.js"></script>
+</body>
+</html>

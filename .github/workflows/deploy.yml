@@ -1,0 +1,110 @@
+name: Build, Push, Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history so git describe / tags work
+
+      - name: Compute version metadata
+        id: meta
+        run: |
+          SHA_TAG="sha-$(git rev-parse --short HEAD)"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # If the current commit has an annotated/light git tag like v1.4.0, capture it; else blank.
+          SEMVER_TAG="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          echo "sha_tag=$SHA_TAG" >> "$GITHUB_OUTPUT"
+          echo "built_at=$BUILT_AT" >> "$GITHUB_OUTPUT"
+          echo "semver_tag=$SEMVER_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha_tag }}
+            BUILD_VERSION=${{ steps.meta.outputs.semver_tag || steps.meta.outputs.sha_tag }}
+            BUILT_AT=${{ steps.meta.outputs.built_at }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/formflow-backend:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.semver_tag != '' && format('{0}/formflow-backend:{1}', secrets.DOCKERHUB_USERNAME, steps.meta.outputs.semver_tag) || '' }}
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha_tag }}
+            BUILD_VERSION=${{ steps.meta.outputs.semver_tag || steps.meta.outputs.sha_tag }}
+            BUILT_AT=${{ steps.meta.outputs.built_at }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/formflow-frontend:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.semver_tag != '' && format('{0}/formflow-frontend:{1}', secrets.DOCKERHUB_USERNAME, steps.meta.outputs.semver_tag) || '' }}
+
+      # NOTE: intentionally no `latest` tag is ever built or pushed.
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to VM over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/formflow
+
+            SHA_TAG="${{ needs.build-and-push.outputs.sha_tag }}"
+
+            export BACKEND_TAG="$SHA_TAG"
+            export FRONTEND_TAG="$SHA_TAG"
+
+            docker compose --env-file .env pull backend frontend
+            docker compose --env-file .env up -d --no-deps backend frontend
+
+            # Wait for backend health before declaring success.
+            for i in $(seq 1 10); do
+              if curl -sf http://localhost/api/version > /dev/null; then
+                break
+              fi
+              echo "Waiting for backend to become healthy... ($i/10)"
+              sleep 3
+            done
+
+            LIVE_VERSION=$(curl -sf http://localhost/api/version | grep -o '"gitSha":"[^"]*"' | cut -d'"' -f4)
+            if [ "$LIVE_VERSION" != "$SHA_TAG" ]; then
+              echo "Deploy verification FAILED: expected $SHA_TAG, backend reports $LIVE_VERSION"
+              exit 1
+            fi
+
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DEPLOY backend=$SHA_TAG frontend=$SHA_TAG operator=github-actions" >> CURRENT_VERSION
+            echo "Deploy verified: $SHA_TAG is live."
