@@ -8,6 +8,16 @@ env:
   DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint docker-compose.yml
+        uses: redcoolbeans/dockerfilelint-action@v1
+        with:
+          files: docker-compose.yml
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
